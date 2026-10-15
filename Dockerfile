@@ -13,7 +13,7 @@ COPY src/web src/web/.
 RUN sh ./bin/build --web-only --version 0.0.1.65534-local
 
 # build the patched Soulseek.NET package used by this image
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0-noble AS soulseek
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:8.0-noble AS soulseek
 
 WORKDIR /src
 
