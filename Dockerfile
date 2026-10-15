@@ -37,7 +37,10 @@ RUN git -C Soulseek.NET apply /tmp/soulseek.patch && \
 # build, test, and publish application binaries
 # note: this needs to be pinned to an amd64 image in order to publish armv7 binaries
 # https://github.com/dotnet/dotnet-docker/issues/1537#issuecomment-615269150
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0-noble AS publish
+# Pin the SDK used by the official 0.26.1 image.  The moving 10.0 tag advanced
+# to runtime 10.0.13, which regresses named Mutex creation for this image's
+# supported non-root execution mode.  10.0.401 carries runtime 10.0.12.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0.401-noble@sha256:e70cdb7f80b0348f5cb85f19a8f670fca061f033d57eed12fa003d58b0e06317 AS publish
 ARG TARGETPLATFORM
 ARG VERSION=0.0.1.65534-local
 
