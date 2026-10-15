@@ -29,10 +29,10 @@ RUN git -C Soulseek.NET apply /tmp/soulseek.patch && \
     -c Release \
     --filter "FullyQualifiedName~PeerConnectionManagerTests" \
     --logger "console;verbosity=minimal" && \
-  dotnet pack Soulseek.NET/src/Soulseek.csproj \
+  dotnet build Soulseek.NET/src/Soulseek.csproj \
     -c Release \
-    -o /packages \
-    -p:PackageVersion=10.0.2-vargabp.1
+    -p:PackageVersion=10.0.2-vargabp.1 \
+    -p:PackageOutputPath=/packages
 
 # build, test, and publish application binaries
 # note: this needs to be pinned to an amd64 image in order to publish armv7 binaries
