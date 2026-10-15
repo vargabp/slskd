@@ -1,0 +1,168 @@
+From 17d11c300b8b2f2616b75864afd7a8828360480e Mon Sep 17 00:00:00 2001
+From: vargabp <vargabp@yahoo.it>
+Date: Thu, 15 Oct 2026 03:16:11 +0100
+Subject: [PATCH] Prefer prompt indirect peer callbacks
+
+---
+ src/Network/PeerConnectionManager.cs          | 32 +++++++-
+ .../Network/PeerConnectionManagerTests.cs     | 79 ++++++++++++++++++-
+ 2 files changed, 106 insertions(+), 5 deletions(-)
+
+diff --git a/src/Network/PeerConnectionManager.cs b/src/Network/PeerConnectionManager.cs
+index 448ec60..34b89f9 100644
+--- a/src/Network/PeerConnectionManager.cs
++++ b/src/Network/PeerConnectionManager.cs
+@@ -40,6 +40,10 @@ namespace Soulseek.Network
+     /// </summary>
+     internal sealed class PeerConnectionManager : IPeerConnectionManager
+     {
++        // A completed TCP handshake does not guarantee that the peer will answer Soulseek protocol messages.
++        // Briefly prefer a solicited callback so a half-responsive direct endpoint cannot mask a usable indirect path.
++        private static readonly TimeSpan IndirectMessageConnectionGracePeriod = TimeSpan.FromMilliseconds(250);
++
+         /// <summary>
+         ///     Initializes a new instance of the <see cref="PeerConnectionManager"/> class.
+         /// </summary>
+@@ -466,12 +470,32 @@ namespace Soulseek.Network
+                 }
+ 
+                 var connection = await task.ConfigureAwait(false);
++                var isDirect = task == direct;
++
++                if (isDirect && indirect.Status != TaskStatus.Faulted && indirect.Status != TaskStatus.Canceled)
++                {
++                    Diagnostic.Debug($"Direct message connection to {username} ({ipEndPoint}) established first; allowing {IndirectMessageConnectionGracePeriod.TotalMilliseconds} ms for the solicited indirect callback.");
++
++                    if (indirect.Status != TaskStatus.RanToCompletion)
++                    {
++                        await Task.WhenAny(indirect, Task.Delay(IndirectMessageConnectionGracePeriod, cancellationToken)).ConfigureAwait(false);
++                    }
++
++                    if (indirect.Status == TaskStatus.RanToCompletion)
++                    {
++                        var directConnection = connection;
++                        connection = await indirect.ConfigureAwait(false);
++                        isDirect = false;
++                        directConnection.Dispose();
++
++                        Diagnostic.Debug($"Indirect message connection to {username} ({connection.IPEndPoint}) selected during the grace period; disposed the TCP-only direct connection.");
++                    }
++                }
++
+                 connection.Disconnected += MessageConnection_Disconnected;
+                 connection.Disconnected -= MessageConnectionProvisional_Disconnected;
+ 
+-                var isDirect = task == direct;
+-
+-                Diagnostic.Debug($"{(isDirect ? "Direct" : "Indirect")} message connection to {username} ({ipEndPoint}) established first, attempting to cancel {(isDirect ? "indirect" : "direct")} connection.");
++                Diagnostic.Debug($"{(isDirect ? "Direct" : "Indirect")} message connection to {username} ({ipEndPoint}) selected, attempting to cancel {(isDirect ? "indirect" : "direct")} connection.");
+                 (isDirect ? indirectCts : directCts).Cancel();
+ 
+                 try
+@@ -856,4 +880,4 @@ namespace Soulseek.Network
+             Diagnostic.Debug($"Message connection cache now contains {MessageConnectionDictionary.Count} connections.");
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/tests/Soulseek.Tests.Unit/Network/PeerConnectionManagerTests.cs b/tests/Soulseek.Tests.Unit/Network/PeerConnectionManagerTests.cs
+index 196c866..c6670ce 100644
+--- a/tests/Soulseek.Tests.Unit/Network/PeerConnectionManagerTests.cs
++++ b/tests/Soulseek.Tests.Unit/Network/PeerConnectionManagerTests.cs
+@@ -2245,6 +2245,83 @@ namespace Soulseek.Tests.Unit.Network
+             }
+         }
+ 
++        [Trait("Category", "GetOrAddMessageConnectionAsync")]
++        [Theory(DisplayName = "GetOrAddMessageConnectionAsync prefers prompt indirect callback over TCP-only direct connection"), AutoData]
++        internal async Task GetOrAddMessageConnectionAsync_Prefers_Prompt_Indirect_Callback_Over_Tcp_Only_Direct_Connection(string localUsername, string username, IPAddress ipAddress, int directPort, int indirectPort)
++        {
++            var dendpoint = new IPEndPoint(ipAddress, directPort);
++            var direct = GetMessageConnectionMock(username, dendpoint);
++            direct.Setup(m => m.Type)
++                .Returns(ConnectionTypes.Direct);
++            direct.Setup(m => m.ConnectAsync(It.IsAny<CancellationToken?>()))
++                .Returns(Task.CompletedTask);
++
++            var iendpoint = new IPEndPoint(ipAddress, indirectPort);
++            var incomingIndirect = GetConnectionMock(iendpoint);
++            incomingIndirect.Setup(m => m.HandoffTcpClient())
++                .Returns(new Mock<ITcpClient>().Object);
++
++            var indirect = GetMessageConnectionMock(username, iendpoint);
++            indirect.Setup(m => m.Type)
++                .Returns(ConnectionTypes.Indirect);
++
++            var (manager, mocks) = GetFixture();
++
++            mocks.Client.Setup(m => m.Username)
++                .Returns(localUsername);
++
++            mocks.ConnectionFactory.Setup(m => m.GetMessageConnection(username, dendpoint, It.IsAny<ConnectionOptions>(), null))
++                .Returns(direct.Object);
++            mocks.ConnectionFactory.Setup(m => m.GetMessageConnection(username, iendpoint, It.IsAny<ConnectionOptions>(), It.IsAny<ITcpClient>()))
++                .Returns(indirect.Object);
++
++            mocks.Waiter.Setup(m => m.Wait<IConnection>(It.IsAny<WaitKey>(), It.IsAny<int>(), It.IsAny<CancellationToken?>()))
++                .Returns(async () =>
++                {
++                    await Task.Delay(50);
++                    return incomingIndirect.Object;
++                });
++
++            using (manager)
++            using (var newConn = await manager.GetOrAddMessageConnectionAsync(username, dendpoint, CancellationToken.None))
++            {
++                Assert.Equal(indirect.Object, newConn);
++                Assert.Equal(ConnectionTypes.Indirect, newConn.Type);
++            }
++
++            direct.Verify(m => m.Dispose(), Times.Once);
++        }
++
++        [Trait("Category", "GetOrAddMessageConnectionAsync")]
++        [Theory(DisplayName = "GetOrAddMessageConnectionAsync falls back to direct connection when indirect callback remains pending"), AutoData]
++        internal async Task GetOrAddMessageConnectionAsync_Falls_Back_To_Direct_When_Indirect_Callback_Remains_Pending(string localUsername, string username, IPAddress ipAddress, int directPort)
++        {
++            var dendpoint = new IPEndPoint(ipAddress, directPort);
++            var direct = GetMessageConnectionMock(username, dendpoint);
++            direct.Setup(m => m.Type)
++                .Returns(ConnectionTypes.Direct);
++
++            var pendingIndirect = new TaskCompletionSource<IConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
++            var (manager, mocks) = GetFixture();
++
++            mocks.Client.Setup(m => m.Username)
++                .Returns(localUsername);
++            mocks.ConnectionFactory.Setup(m => m.GetMessageConnection(username, dendpoint, It.IsAny<ConnectionOptions>(), null))
++                .Returns(direct.Object);
++            mocks.Waiter.Setup(m => m.Wait<IConnection>(It.IsAny<WaitKey>(), It.IsAny<int>(), It.IsAny<CancellationToken?>()))
++                .Returns(pendingIndirect.Task);
++
++            using (manager)
++            using (var newConn = await manager.GetOrAddMessageConnectionAsync(username, dendpoint, CancellationToken.None))
++            {
++                Assert.Equal(direct.Object, newConn);
++                Assert.Equal(ConnectionTypes.Direct, newConn.Type);
++                direct.Verify(m => m.Dispose(), Times.Never);
++            }
++
++            pendingIndirect.TrySetCanceled();
++        }
++
+         [Trait("Category", "GetOrAddMessageConnectionAsync")]
+         [Theory(DisplayName = "GetOrAddMessageConnectionAsync returns indirect connection when indirect connects first"), AutoData]
+         internal async Task GetOrAddMessageConnectionAsync_Returns_Indirect_Connection_When_Indirect_Connects_First(string localUsername, string username, IPAddress ipAddress, int directPort, int indirectPort)
+@@ -2355,7 +2432,7 @@ namespace Soulseek.Tests.Unit.Network
+             using (var newConn = await manager.GetOrAddMessageConnectionAsync(username, dendpoint, CancellationToken.None))
+             {
+                 Assert.Contains(diagnostics, s => s.ContainsInsensitive("Attempting simultaneous direct and indirect message connections"));
+-                Assert.Contains(diagnostics, s => s.ContainsInsensitive($"established first, attempting to cancel"));
++                Assert.Contains(diagnostics, s => s.ContainsInsensitive($"selected, attempting to cancel"));
+                 Assert.Contains(
+                     diagnostics,
+                     s => s.ContainsInsensitive("message connection to") && s.ContainsInsensitive("established."));
+-- 
+2.53.0.windows.2
+

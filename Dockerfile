@@ -12,6 +12,28 @@ COPY src/web src/web/.
 
 RUN sh ./bin/build --web-only --version 0.0.1.65534-local
 
+# build the patched Soulseek.NET package used by this image
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0-noble AS soulseek
+
+WORKDIR /src
+
+RUN apt-get update && apt-get install --no-install-recommends -y git && \
+  rm -rf /var/lib/apt/lists/*
+
+RUN git clone --branch 10.0.2 --depth 1 https://github.com/jpdillingham/Soulseek.NET.git Soulseek.NET
+
+COPY patches/0001-Prefer-prompt-indirect-peer-callbacks.patch /tmp/soulseek.patch
+
+RUN git -C Soulseek.NET apply /tmp/soulseek.patch && \
+  dotnet test Soulseek.NET/tests/Soulseek.Tests.Unit/Soulseek.Tests.Unit.csproj \
+    -c Release \
+    --filter "FullyQualifiedName~PeerConnectionManagerTests" \
+    --logger "console;verbosity=minimal" && \
+  dotnet pack Soulseek.NET/src/Soulseek.csproj \
+    -c Release \
+    -o /packages \
+    -p:PackageVersion=10.0.2-vargabp.1
+
 # build, test, and publish application binaries
 # note: this needs to be pinned to an amd64 image in order to publish armv7 binaries
 # https://github.com/dotnet/dotnet-docker/issues/1537#issuecomment-615269150
@@ -26,6 +48,10 @@ COPY bin bin/.
 COPY config config/.
 COPY src/slskd src/slskd/.
 COPY tests tests/.
+COPY --from=soulseek /packages /packages
+
+RUN dotnet nuget add source /packages --name patched-soulseek && \
+  sed -i 's/Include="Soulseek" Version="10.0.2"/Include="Soulseek" Version="10.0.2-vargabp.1"/' src/slskd/slskd.csproj
 
 COPY --from=web /slskd/src/web/build /slskd/src/slskd/wwwroot/.
 

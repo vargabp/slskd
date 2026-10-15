@@ -1,0 +1,39 @@
+name: Build indirect callback race fix image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/indirect-callback-race-fix
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and push pinned image
+        shell: bash
+        run: |
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            --build-arg TAG=0.26.1-indirect-race-fix \
+            --build-arg VERSION=0.26.1.0+71dcc7a6.indirectfix1 \
+            --build-arg REVISION=17d11c300b8b2f2616b75864afd7a8828360480e \
+            --build-arg BUILD_DATE="$build_date" \
+            --label org.opencontainers.image.source=https://github.com/vargabp/slskd \
+            --label org.opencontainers.image.revision=17d11c300b8b2f2616b75864afd7a8828360480e \
+            --tag ghcr.io/vargabp/slskd:0.26.1-indirect-race-fix \
+            --tag ghcr.io/vargabp/slskd:0.26.1-indirect-race-fix-17d11c3 \
+            .
